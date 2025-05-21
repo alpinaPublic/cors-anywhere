@@ -1,49 +1,70 @@
-// Listen on a specific host via the HOST environment variable
-var host = process.env.HOST || '0.0.0.0';
-// Listen on a specific port via the PORT environment variable
-var port = process.env.PORT || 8080;
+const express = require('express');
+const http = require('http');
+const cors_proxy = require('./lib/cors-anywhere');
 
-// Grab the blacklist from the command-line so that we can update the blacklist without deploying
-// again. CORS Anywhere is open by design, and this blacklist is not used, except for countering
-// immediate abuse (e.g. denial of service). If you want to block all origins except for some,
-// use originWhitelist instead.
-var originBlacklist = parseEnvList(process.env.CORSANYWHERE_BLACKLIST);
-var originWhitelist = parseEnvList(process.env.CORSANYWHERE_WHITELIST);
+// ENV-Konfiguration
+const host = process.env.HOST || '0.0.0.0';
+const port = process.env.PORT || 8080;
+const originBlacklist = parseEnvList(process.env.CORSANYWHERE_BLACKLIST);
+const originWhitelist = parseEnvList(process.env.CORSANYWHERE_WHITELIST);
+const checkRateLimit = require('./lib/rate-limit')(process.env.CORSANYWHERE_RATELIMIT);
+
 function parseEnvList(env) {
-  if (!env) {
-    return [];
-  }
+  if (!env) return [];
   return env.split(',');
 }
 
-// Set up rate-limiting to avoid abuse of the public CORS Anywhere server.
-var checkRateLimit = require('./lib/rate-limit')(process.env.CORSANYWHERE_RATELIMIT);
+// Starte den Express-Server
+const app = express();
 
-var cors_proxy = require('./lib/cors-anywhere');
-cors_proxy.createServer({
-  originBlacklist: originBlacklist,
-  originWhitelist: originWhitelist,
+// Custom Base64-Proxy-Endpunkt
+app.get('/proxy', (req, res) => {
+  const encodedUrl = req.query.url;
+  if (!encodedUrl) {
+    return res.status(400).send('Missing ?url parameter (Base64 encoded)');
+  }
+
+  let decodedUrl;
+  try {
+    decodedUrl = Buffer.from(encodedUrl, 'base64').toString('utf8');
+    if (!/^https?:\/\//.test(decodedUrl)) {
+      return res.status(400).send('Decoded URL must start with http:// or https://');
+    }
+  } catch (err) {
+    return res.status(400).send('Invalid Base64 URL');
+  }
+
+  // Füge den dekodierten Pfad als Fake-URL in req.url ein (benötigt von cors-anywhere)
+  req.url = '/' + decodedUrl;
+
+  proxy.emit('request', req, res);
+});
+
+// Starte den regulären CORS-Proxy
+const proxy = cors_proxy.createServer({
+  originBlacklist,
+  originWhitelist,
   requireHeader: ['origin', 'x-requested-with'],
-  checkRateLimit: checkRateLimit,
+  checkRateLimit,
   removeHeaders: [
-    'cookie',
-    'cookie2',
-    // Strip Heroku-specific headers
-    'x-request-start',
-    'x-request-id',
-    'via',
-    'connect-time',
-    'total-route-time',
-    // Other Heroku added debug headers
-    // 'x-forwarded-for',
-    // 'x-forwarded-proto',
-    // 'x-forwarded-port',
+    'cookie', 'cookie2',
+    'x-request-start', 'x-request-id', 'via', 'connect-time', 'total-route-time',
   ],
   redirectSameOrigin: true,
   httpProxyOptions: {
-    // Do not add X-Forwarded-For, etc. headers, because Heroku already adds it.
     xfwd: false,
   },
-}).listen(port, host, function() {
-  console.log('Running CORS Anywhere on ' + host + ':' + port);
+});
+
+// Binde den Proxy an Express für Standardrouten
+const server = http.createServer((req, res) => {
+  if (req.url.startsWith('/proxy?')) {
+    app(req, res); // delegiere an Express-Handler
+  } else {
+    proxy.emit('request', req, res);
+  }
+});
+
+server.listen(port, host, () => {
+  console.log('✅ CORS Anywhere mit Base64-Support läuft auf ' + host + ':' + port);
 });
