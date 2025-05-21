@@ -1,5 +1,4 @@
 const express = require('express');
-const http = require('http');
 const cors_proxy = require('./lib/cors-anywhere');
 
 // ENV-Konfiguration
@@ -14,33 +13,8 @@ function parseEnvList(env) {
   return env.split(',');
 }
 
-// Starte den Express-Server
 const app = express();
 
-// Custom Base64-Proxy-Endpunkt
-app.get('/proxy', (req, res) => {
-  const encodedUrl = req.query.url;
-  if (!encodedUrl) {
-    return res.status(400).send('Missing ?url parameter (Base64 encoded)');
-  }
-
-  let decodedUrl;
-  try {
-    decodedUrl = Buffer.from(encodedUrl, 'base64').toString('utf8');
-    if (!/^https?:\/\//.test(decodedUrl)) {
-      return res.status(400).send('Decoded URL must start with http:// or https://');
-    }
-  } catch (err) {
-    return res.status(400).send('Invalid Base64 URL');
-  }
-
-  // Füge den dekodierten Pfad als Fake-URL in req.url ein (benötigt von cors-anywhere)
-  req.url = '/' + decodedUrl;
-
-  proxy.emit('request', req, res);
-});
-
-// Starte den regulären CORS-Proxy
 const proxy = cors_proxy.createServer({
   originBlacklist,
   originWhitelist,
@@ -56,15 +30,34 @@ const proxy = cors_proxy.createServer({
   },
 });
 
-// Binde den Proxy an Express für Standardrouten
-const server = http.createServer((req, res) => {
-  if (req.url.startsWith('/proxy?')) {
-    app(req, res); // delegiere an Express-Handler
-  } else {
-    proxy.emit('request', req, res);
+// Custom Base64 Proxy Endpoint
+app.use('/proxy', (req, res) => {
+  const encodedUrl = req.query.url;
+  if (!encodedUrl) {
+    return res.status(400).send('Missing ?url parameter (Base64 encoded)');
   }
+
+  let decodedUrl;
+  try {
+    decodedUrl = Buffer.from(encodedUrl, 'base64').toString('utf8');
+    if (!/^https?:\/\//.test(decodedUrl)) {
+      return res.status(400).send('Decoded URL must start with http:// or https://');
+    }
+  } catch (err) {
+    return res.status(400).send('Invalid Base64 URL');
+  }
+
+  // Setze req.url für den Proxy auf den dekodierten Pfad
+  req.url = '/' + decodedUrl;
+
+  proxy.emit('request', req, res);
 });
 
-server.listen(port, host, () => {
-  console.log('✅ CORS Anywhere mit Base64-Support läuft auf ' + host + ':' + port);
+// Alle anderen Anfragen normal per Proxy weiterleiten
+app.use((req, res) => {
+  proxy.emit('request', req, res);
+});
+
+app.listen(port, host, () => {
+  console.log(`✅ CORS Anywhere mit Base64-Support läuft auf ${host}:${port}`);
 });
